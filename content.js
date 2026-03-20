@@ -1,14 +1,26 @@
 // 内容脚本 - 处理页面上的划词翻译
+console.log('[Translate Extension] Content script loaded!');
+
 (function() {
   'use strict';
 
+  // 防止重复加载
+  if (window.translateExtensionLoaded) {
+    console.log('[Translate Extension] Already loaded, skipping...');
+    return;
+  }
+  window.translateExtensionLoaded = true;
+
   let translatePopup = null;
   let isTranslating = false;
+  let lastSelection = '';
+  let lastSelectionTime = 0;
 
   // 创建翻译弹窗
   function createPopup() {
+    console.log('[Translate Extension] Creating popup...');
     const popup = document.createElement('div');
-    popup.id = 'translate-popup';
+    popup.id = 'translate-popup-extension';
     popup.innerHTML = `
       <div class="translate-header">
         <span class="translate-title">🌐 翻译结果</span>
@@ -26,9 +38,13 @@
     `;
     
     // 关闭按钮事件
-    popup.querySelector('.translate-close').addEventListener('click', hidePopup);
+    popup.querySelector('.translate-close').addEventListener('click', (e) => {
+      e.stopPropagation();
+      hidePopup();
+    });
     
     document.body.appendChild(popup);
+    console.log('[Translate Extension] Popup created and appended to body');
     return popup;
   }
 
@@ -48,7 +64,7 @@
       translatePopup.style.left = `${window.innerWidth - rect.width - 10}px`;
     }
     if (rect.bottom > window.innerHeight) {
-      translatePopup.style.top = `${y - rect.height - 30}px`;
+      translatePopup.style.top = `${Math.max(10, y - rect.height - 10)}px`;
     }
   }
 
@@ -61,6 +77,7 @@
 
   // 显示翻译结果
   function showTranslation(original, translation, x, y) {
+    console.log('[Translate Extension] Showing translation:', original, '->', translation);
     if (!translatePopup) {
       translatePopup = createPopup();
     }
@@ -87,44 +104,82 @@
 
   // 翻译选中的文字
   function translateSelection(text, x, y) {
+    console.log('[Translate Extension] Translating:', text);
     if (isTranslating) return;
     
     isTranslating = true;
     showLoading(x, y);
     
-    chrome.runtime.sendMessage(
-      { action: "translate", text: text },
-      (response) => {
-        isTranslating = false;
-        if (response && response.translation) {
-          showTranslation(text, response.translation, x, y);
-        } else {
-          showTranslation(text, '翻译失败', x, y);
+    try {
+      chrome.runtime.sendMessage(
+        { action: "translate", text: text },
+        (response) => {
+          isTranslating = false;
+          console.log('[Translate Extension] Got response:', response);
+          if (chrome.runtime.lastError) {
+            console.error('[Translate Extension] Runtime error:', chrome.runtime.lastError);
+            showTranslation(text, '翻译服务错误: ' + chrome.runtime.lastError.message, x, y);
+          } else if (response && response.translation) {
+            showTranslation(text, response.translation, x, y);
+          } else {
+            showTranslation(text, '翻译失败，请重试', x, y);
+          }
         }
-      }
-    );
+      );
+    } catch (error) {
+      console.error('[Translate Extension] Send message error:', error);
+      isTranslating = false;
+      showTranslation(text, '翻译出错: ' + error.message, x, y);
+    }
   }
 
   // 监听鼠标抬起事件（划词结束）
   document.addEventListener('mouseup', (e) => {
     // 延迟一点，确保选区已更新
     setTimeout(() => {
-      const selection = window.getSelection();
-      const selectedText = selection.toString().trim();
-      
-      // 如果选中了文字且不是点击在弹窗内
-      if (selectedText && selectedText.length > 0 && selectedText.length < 500) {
-        // 检查点击位置是否在弹窗内
-        if (translatePopup && translatePopup.contains(e.target)) {
+      try {
+        const selection = window.getSelection();
+        const selectedText = selection.toString().trim();
+        
+        console.log('[Translate Extension] Mouse up, selection:', selectedText);
+        
+        // 防抖动：如果和上次选择一样，且时间间隔短，则忽略
+        const now = Date.now();
+        if (selectedText === lastSelection && now - lastSelectionTime < 500) {
           return;
         }
+        lastSelection = selectedText;
+        lastSelectionTime = now;
         
-        const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        
-        translateSelection(selectedText, rect.left, rect.bottom + window.scrollY + 10);
+        // 如果选中了文字且不是点击在弹窗内
+        if (selectedText && selectedText.length > 0 && selectedText.length < 500) {
+          // 检查点击位置是否在弹窗内
+          if (translatePopup && translatePopup.contains(e.target)) {
+            return;
+          }
+          
+          // 获取选区位置
+          let range;
+          try {
+            range = selection.getRangeAt(0);
+          } catch (e) {
+            console.log('[Translate Extension] No range available');
+            return;
+          }
+          
+          const rect = range.getBoundingClientRect();
+          console.log('[Translate Extension] Selection rect:', rect);
+          
+          // 计算弹窗位置
+          const x = rect.left + window.scrollX;
+          const y = rect.bottom + window.scrollY + 10;
+          
+          translateSelection(selectedText, x, y);
+        }
+      } catch (error) {
+        console.error('[Translate Extension] Error in mouseup handler:', error);
       }
-    }, 10);
+    }, 50);
   });
 
   // 点击页面其他地方关闭弹窗
@@ -136,12 +191,18 @@
 
   // 监听来自背景脚本的消息
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    console.log('[Translate Extension] Received message:', request);
     if (request.action === "showTranslation") {
       const selection = window.getSelection();
-      const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      showTranslation(request.text, request.translation, rect.left, rect.bottom + window.scrollY + 10);
+      if (selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        showTranslation(request.text, request.translation, 
+          rect.left + window.scrollX, 
+          rect.bottom + window.scrollY + 10);
+      }
     }
+    return true;
   });
 
   // ESC 键关闭弹窗
@@ -150,5 +211,7 @@
       hidePopup();
     }
   });
+
+  console.log('[Translate Extension] Content script initialized successfully!');
 
 })();

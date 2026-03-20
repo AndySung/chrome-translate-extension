@@ -1,5 +1,5 @@
 /* 划词翻译弹窗样式 */
-#translate-popup {
+#translate-popup-extension {
   position: absolute;
   z-index: 999999;
   min-width: 280px;
